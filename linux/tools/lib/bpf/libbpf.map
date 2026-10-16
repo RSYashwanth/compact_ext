@@ -394,6 +394,7 @@ LIBBPF_1.2.0 {
 
 LIBBPF_1.3.0 {
 	global:
+		bpf_map__attach_compact_ext_ops;
 		bpf_obj_pin_opts;
 		bpf_object__unpin;
 		bpf_prog_detach_opts;

@@ -121,6 +121,7 @@ static const char * const attach_type_name[] = {
 	[BPF_TCX_INGRESS]		= "tcx_ingress",
 	[BPF_TCX_EGRESS]		= "tcx_egress",
 	[BPF_TRACE_UPROBE_MULTI]	= "trace_uprobe_multi",
+	[BPF_COMPACT_EXT_OPS]		= "compact_ext_ops",
 };
 
 static const char * const link_type_name[] = {
@@ -137,6 +138,7 @@ static const char * const link_type_name[] = {
 	[BPF_LINK_TYPE_NETFILTER]		= "netfilter",
 	[BPF_LINK_TYPE_TCX]			= "tcx",
 	[BPF_LINK_TYPE_UPROBE_MULTI]		= "uprobe_multi",
+	[BPF_LINK_TYPE_COMPACT_EXT_OPS]		= "compact_ext_ops",
 };
 
 static const char * const map_type_name[] = {
@@ -12199,6 +12201,57 @@ struct bpf_link *bpf_map__attach_struct_ops(const struct bpf_map *map)
 	link->map_fd = map->fd;
 
 	return &link->link;
+}
+
+struct bpf_link *bpf_map__attach_compact_ext_ops(const struct bpf_map *map,
+						  int node_id)
+{
+	char errmsg[STRERR_BUFSIZE];
+	struct bpf_link *link;
+	__u32 zero = 0;
+	int err, fd;
+
+	if (!map || !bpf_map__is_struct_ops(map))
+		return libbpf_err_ptr(-EINVAL);
+
+	if (!(map->def.map_flags & BPF_F_LINK)) {
+		pr_warn("map '%s': compact_ext_ops can only be attached through a link, define it in SEC(\".struct_ops.link\")\n",
+			map->name);
+		return libbpf_err_ptr(-EINVAL);
+	}
+
+	if (node_id < 0) {
+		pr_warn("map '%s': invalid NUMA node id %d\n", map->name, node_id);
+		return libbpf_err_ptr(-EINVAL);
+	}
+
+	if (map->fd < 0)
+		return libbpf_err_ptr(-EINVAL);
+
+	err = bpf_map_update_elem(map->fd, &zero, map->st_ops->kern_vdata, 0);
+	if (err && err != -EBUSY) {
+		pr_warn("map '%s': failed to update struct_ops value: %s\n",
+			map->name, libbpf_strerror_r(err, errmsg, sizeof(errmsg)));
+		return libbpf_err_ptr(err);
+	}
+
+	link = calloc(1, sizeof(*link));
+	if (!link)
+		return libbpf_err_ptr(-ENOMEM);
+
+	link->detach = &bpf_link__detach_fd;
+
+	fd = bpf_link_create(map->fd, node_id, BPF_COMPACT_EXT_OPS, NULL);
+	if (fd < 0) {
+		free(link);
+		pr_warn("map '%s': failed to attach to node %d: %s\n",
+			map->name, node_id,
+			libbpf_strerror_r(fd, errmsg, sizeof(errmsg)));
+		return libbpf_err_ptr(fd);
+	}
+
+	link->fd = fd;
+	return link;
 }
 
 /*

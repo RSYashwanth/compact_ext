@@ -28,6 +28,7 @@
 #include <linux/audit.h>
 #include <uapi/linux/btf.h>
 #include <linux/pgtable.h>
+#include <linux/compact_ext.h>
 #include <linux/bpf_lsm.h>
 #include <linux/poll.h>
 #include <linux/sort.h>
@@ -4901,6 +4902,9 @@ static int link_create(union bpf_attr *attr, bpfptr_t uattr)
 
 	if (attr->link_create.attach_type == BPF_STRUCT_OPS)
 		return bpf_struct_ops_link_create(attr);
+
+	if (attr->link_create.attach_type == BPF_COMPACT_EXT_OPS)
+		return bpf_compact_ext_ops_link_create(attr);
 
 	prog = bpf_prog_get(attr->link_create.prog_fd);
 	if (IS_ERR(prog))

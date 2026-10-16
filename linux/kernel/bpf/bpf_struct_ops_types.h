@@ -9,4 +9,8 @@ BPF_STRUCT_OPS_TYPE(bpf_dummy_ops)
 #include <net/tcp.h>
 BPF_STRUCT_OPS_TYPE(tcp_congestion_ops)
 #endif
+#ifdef CONFIG_COMPACT_EXT
+#include <linux/compact_ext.h>
+BPF_STRUCT_OPS_TYPE(compact_ext_ops)
+#endif
 #endif

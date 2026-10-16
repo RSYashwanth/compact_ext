@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+source "$(dirname "$(realpath "$0")")/common.sh"
+
+log "reading $SMALL_FILES small files"
+numactl --membind="$NODE" find "$FILES_DIR" -type f -exec cat {} + >/dev/null
+log "reading the ${BIG_FILE_MB} MB file"
+numactl --membind="$NODE" cat "$BIG_FILE" >/dev/null

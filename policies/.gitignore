@@ -1,0 +1,5 @@
+*.o
+*.out
+*.skel.h
+vmlinux.h
+vmlinux.h.tmp

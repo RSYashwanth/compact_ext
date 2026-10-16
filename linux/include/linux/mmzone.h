@@ -114,6 +114,8 @@ struct free_area {
 };
 
 struct pglist_data;
+struct compact_ext_ops;
+struct compact_ext_ds_registry;
 
 #ifdef CONFIG_NUMA
 enum numa_stat_item {
@@ -1328,6 +1330,10 @@ typedef struct pglist_data {
 	wait_queue_head_t kcompactd_wait;
 	struct task_struct *kcompactd;
 	bool proactive_compact_trigger;
+#endif
+#ifdef CONFIG_COMPACT_EXT
+	struct compact_ext_ops __rcu *compact_ext_ops;
+	struct compact_ext_ds_registry *compact_ext_registry;
 #endif
 	/*
 	 * This is a per-node reserve of pages that are not available

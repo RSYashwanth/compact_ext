@@ -204,7 +204,7 @@ config ZSMALLOC_STAT
 	  This option enables code in the zsmalloc to collect various
 	  statistics about what's happening in zsmalloc and exports that
 	  information to userspace via debugfs.
-	  If unsure, say N.
+	  If unsure, say Y.
 
 config ZSMALLOC_CHAIN_SIZE
 	int "Maximum number of physical pages per-zspage"
@@ -655,6 +655,18 @@ config COMPACT_UNEVICTABLE_DEFAULT
 	depends on COMPACTION
 	default 0 if PREEMPT_RT
 	default 1
+
+config COMPACT_EXT
+	bool "BPF-pluggable memory compaction policies (compact_ext)"
+	depends on COMPACTION && BPF_SYSCALL && BPF_JIT && DEBUG_INFO_BTF
+	default y
+	help
+	  Lets a BPF struct_ops program (struct compact_ext_ops) be attached
+	  to a NUMA node to steer memory compaction on that node: when it
+	  runs, which pageblocks and folios it moves, and when it stops.
+	  Policies are attached with a BPF_COMPACT_EXT_OPS link.
+
+	  If unsure, say Y.
 
 #
 # support for free page reporting

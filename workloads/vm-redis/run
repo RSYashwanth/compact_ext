@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+source "$(dirname "$(realpath "$0")")/common.sh"
+: "${METRICS:?METRICS is not set (run this through run_benchmark.py)}"
+
+metric() { echo "$1: $2" >>"$METRICS"; }
+now() { date +%s.%N; }
+elapsed() { awk -v a="$1" -v b="$(now)" 'BEGIN {printf "%.2f", b - a}'; }
+
+bench() {
+	local test=$1 t0 out
+	shift
+	t0=$(now)
+	out=$(vssh "redis-benchmark -t ${test,,} -r $KEYS -c $BENCH_CLIENTS" \
+		   "--threads $BENCH_THREADS --csv $*" | tr '\r' '\n')
+	awk -F'"' -v t="$test" -v w="$(elapsed "$t0")" \
+	    '$2 == t {print $4, $10, $14, $16, w; found = 1} END {exit !found}' <<<"$out" ||
+		die "no $test result from redis-benchmark: $out"
+}
+
+grep -q '\[never\]' /sys/kernel/mm/transparent_hugepage/enabled &&
+	die "transparent huge pages are off on the host (transparent_hugepage/enabled)"
+
+log "booting the guest (${VM_MB} MB, $VM_CPUS vCPUs) on node $NODE"
+t0=$(now)
+boot "$VM_MB"
+metric vm.boot_s "$(elapsed "$t0")"
+pid=$(qemu_pid)
+
+vssh 'echo always | sudo tee /sys/kernel/mm/transparent_hugepage/enabled >/dev/null'
+vssh "redis-server --save '' --appendonly no --disable-thp no --daemonize yes &&
+      for i in \$(seq 100); do redis-cli ping 2>/dev/null | grep -q PONG && exit 0; sleep 0.1; done
+      exit 1" || die "Redis did not start in the guest"
+
+log "LOAD: $LOAD_REQUESTS SETs over $KEYS keys"
+read -r rps p50 p99 max wall < <(bench SET -n "$LOAD_REQUESTS" -d "$VALUE_BYTES" -P "$LOAD_PIPELINE")
+metric redis.load_ops_per_s "$rps"
+metric redis.load_s "$wall"
+metric redis.load_p50_ms "$p50"
+metric redis.load_p99_ms "$p99"
+metric redis.load_max_ms "$max"
+used=$(vssh 'redis-cli info memory' | tr -d '\r' | awk -F: '$1 == "used_memory" {print $2}')
+metric redis.used_memory_mb $((used >> 20))
+
+sum_rps=0 sum_p50=0 sum_p99=0
+for i in $(seq 1 "$READ_RUNS"); do
+	log "READ $i/$READ_RUNS: $READ_REQUESTS GETs"
+	read -r rps p50 p99 max wall < <(bench GET -n "$READ_REQUESTS" -P "$READ_PIPELINE")
+	metric "redis.read${i}_ops_per_s" "$rps"
+	sum_rps=$(awk -v a="$sum_rps" -v b="$rps" 'BEGIN {print a + b}')
+	sum_p50=$(awk -v a="$sum_p50" -v b="$p50" 'BEGIN {print a + b}')
+	sum_p99=$(awk -v a="$sum_p99" -v b="$p99" 'BEGIN {print a + b}')
+done
+mean() { awk -v s="$1" -v n="$READ_RUNS" 'BEGIN {printf "%.3f", s / n}'; }
+metric redis.read_ops_per_s "$(mean "$sum_rps")"
+metric redis.read_p50_ms "$(mean "$sum_p50")"
+metric redis.read_p99_ms "$(mean "$sum_p99")"
+
+read -r rss huge < <(awk '$1 == "Rss:" {r = $2} $1 == "AnonHugePages:" {h = $2}
+			  END {print r, h}' "/proc/$pid/smaps_rollup")
+metric vm.rss_mb $((rss >> 10))
+metric vm.huge_pages_mb $((huge >> 10))
+metric vm.huge_pages_pct "$(awk -v r="$rss" -v h="$huge" 'BEGIN {printf "%.1f", r ? 100 * h / r : 0}')"
+ticks=$(sed 's/.*) //' "/proc/$pid/stat" | awk '{print $12 + $13}')
+metric vm.cpu_s "$(awk -v t="$ticks" -v hz="$(getconf CLK_TCK)" 'BEGIN {printf "%.1f", t / hz}')"
+
+shutdown_guest

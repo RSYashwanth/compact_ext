@@ -1,0 +1,91 @@
+#!/usr/bin/env bash
+source "$(dirname "$(realpath "$0")")/common.sh"
+
+need_tools() {
+	local missing=()
+	for t in qemu-system-x86_64 qemu-img cloud-localds numactl ssh ssh-keygen curl sha256sum; do
+		command -v "$t" >/dev/null || missing+=("$t")
+	done
+	((${#missing[@]} == 0)) && return 0
+	command -v apt-get >/dev/null ||
+		die "missing tools: ${missing[*]}; install them and run again"
+	log "installing host tools"
+	DEBIAN_FRONTEND=noninteractive apt-get install -y -q qemu-system-x86 qemu-utils \
+		cloud-image-utils numactl openssh-client curl coreutils >&2
+}
+
+base_image() {
+	local sums name
+
+	[[ -f $BASE_IMG ]] && return 0
+	log "downloading $IMAGE_URL"
+	curl -fsSL -o "$BASE_IMG.tmp" "$IMAGE_URL"
+	name=${IMAGE_URL##*/}
+	sums=$(curl -fsSL "${IMAGE_URL%/*}/SHA256SUMS") ||
+		die "could not fetch SHA256SUMS next to $IMAGE_URL"
+	grep -q "$(sha256sum "$BASE_IMG.tmp" | cut -d' ' -f1) \*\?$name\$" <<<"$sums" ||
+		die "checksum mismatch for $name"
+	mv "$BASE_IMG.tmp" "$BASE_IMG"
+}
+
+guest() {
+	[[ -f $DATA_DIR/.guest-done ]] && return 0
+	log "creating the guest (first boot installs Redis)"
+	[[ -f $KEY ]] || ssh-keygen -q -t ed25519 -N '' -f "$KEY"
+	qemu-img create -q -f qcow2 -F qcow2 -b "$BASE_IMG" "$DISK" 20G
+	cat >"$DATA_DIR/user-data" <<-EOF
+	#cloud-config
+	users:
+	  - name: ubuntu
+	    sudo: ALL=(ALL) NOPASSWD:ALL
+	    shell: /bin/bash
+	    ssh_authorized_keys: [$(cat "$KEY.pub")]
+	package_update: true
+	packages: [redis-server, redis-tools]
+	runcmd:
+	  - [systemctl, disable, --now, redis-server]
+	  - [systemctl, disable, --now, unattended-upgrades, snapd, apt-daily.timer, apt-daily-upgrade.timer]
+	EOF
+	cloud-localds "$SEED" "$DATA_DIR/user-data"
+	boot 2048 "$SEED"
+	vssh 'cloud-init status --wait >/dev/null; redis-server --version' >&2
+	shutdown_guest
+	touch "$DATA_DIR/.guest-done"
+}
+
+small_files() {
+	[[ $(cat "$DATA_DIR/.files-done" 2>/dev/null) == "$SMALL_FILES $SMALL_FILE_BYTES" ]] &&
+		return 0
+	rm -rf "$FILES_DIR" "$DATA_DIR/.files-done"
+	log "creating $SMALL_FILES files of $SMALL_FILE_BYTES bytes in $FILES_DIR"
+	python3 - "$FILES_DIR" "$SMALL_FILES" "$SMALL_FILE_BYTES" <<-'EOF'
+	import os, sys
+	root, n, size = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+	data = os.urandom(size)
+	for i in range(n):
+	    d = os.path.join(root, f"d{i // 1000:05d}")
+	    if i % 1000 == 0:
+	        os.makedirs(d, exist_ok=True)
+	    with open(os.path.join(d, f"f{i % 1000:03d}"), "wb") as f:
+	        f.write(data)
+	EOF
+	echo "$SMALL_FILES $SMALL_FILE_BYTES" >"$DATA_DIR/.files-done"
+}
+
+big_file() {
+	[[ -f $BIG_FILE && $(stat -c %s "$BIG_FILE") -eq $((BIG_FILE_MB << 20)) ]] && return 0
+	log "writing a ${BIG_FILE_MB} MB file"
+	dd if=/dev/urandom of="$BIG_FILE.tmp" bs=1M count="$BIG_FILE_MB" \
+	   iflag=fullblock status=none
+	mv "$BIG_FILE.tmp" "$BIG_FILE"
+}
+
+[[ -e /dev/kvm ]] || die "/dev/kvm is missing: KVM is needed to run the guest"
+mkdir -p "$DATA_DIR"
+trap shutdown_guest EXIT
+need_tools
+base_image
+guest
+small_files
+big_file
+sync

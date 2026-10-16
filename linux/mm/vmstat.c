@@ -1327,6 +1327,7 @@ const char * const vmstat_text[] = {
 	"compact_daemon_wake",
 	"compact_daemon_migrate_scanned",
 	"compact_daemon_free_scanned",
+	"compact_evicted",
 #endif
 
 #ifdef CONFIG_HUGETLB_PAGE

@@ -12,6 +12,8 @@
 #include <linux/mutex.h>
 #include <linux/btf_ids.h>
 #include <linux/rcupdate_wait.h>
+#include <linux/nospec.h>
+#include <linux/compact_ext.h>
 
 enum bpf_struct_ops_state {
 	BPF_STRUCT_OPS_STATE_INIT,
@@ -525,7 +527,7 @@ static long bpf_struct_ops_map_update_elem(struct bpf_map *map, void *key,
 	}
 
 	set_memory_rox((long)st_map->image, 1);
-	err = st_ops->reg(kdata);
+	err = st_ops->reg(kdata, NULL);
 	if (likely(!err)) {
 		/* This refcnt increment on the map here after
 		 * 'st_ops->reg()' is secure since the state of the
@@ -574,7 +576,7 @@ static long bpf_struct_ops_map_delete_elem(struct bpf_map *map, void *key)
 			     BPF_STRUCT_OPS_STATE_TOBEFREE);
 	switch (prev_state) {
 	case BPF_STRUCT_OPS_STATE_INUSE:
-		st_map->st_ops->unreg(&st_map->kvalue.data);
+		st_map->st_ops->unreg(&st_map->kvalue.data, NULL);
 		bpf_map_put(map);
 		return 0;
 	case BPF_STRUCT_OPS_STATE_TOBEFREE:
@@ -776,7 +778,7 @@ static void bpf_struct_ops_map_link_dealloc(struct bpf_link *link)
 		/* st_link->map can be NULL if
 		 * bpf_struct_ops_link_create() fails to register.
 		 */
-		st_map->st_ops->unreg(&st_map->kvalue.data);
+		st_map->st_ops->unreg(&st_map->kvalue.data, NULL);
 		bpf_map_put(&st_map->map);
 	}
 	kfree(st_link);
@@ -892,7 +894,7 @@ int bpf_struct_ops_link_create(union bpf_attr *attr)
 	if (err)
 		goto err_out;
 
-	err = st_map->st_ops->reg(st_map->kvalue.data);
+	err = st_map->st_ops->reg(st_map->kvalue.data, NULL);
 	if (err) {
 		bpf_link_cleanup(&link_primer);
 		link = NULL;
@@ -908,3 +910,135 @@ err_out:
 	return err;
 }
 
+#ifdef CONFIG_COMPACT_EXT
+
+struct bpf_compact_ext_ops_link {
+	struct bpf_link link;
+	struct bpf_map __rcu *map;
+	int node_id;
+};
+
+static void bpf_compact_ext_ops_map_link_dealloc(struct bpf_link *link)
+{
+	struct bpf_compact_ext_ops_link *st_link;
+	struct bpf_struct_ops_map *st_map;
+	pg_data_t *pgdat;
+
+	st_link = container_of(link, struct bpf_compact_ext_ops_link, link);
+	st_map = (struct bpf_struct_ops_map *)
+		rcu_dereference_protected(st_link->map, true);
+
+	pgdat = NODE_DATA(st_link->node_id);
+	if (st_map) {
+		st_map->st_ops->unreg(&st_map->kvalue.data, pgdat);
+		bpf_map_put(&st_map->map);
+	}
+
+	kfree(st_link);
+}
+
+static void bpf_compact_ext_ops_map_link_show_fdinfo(const struct bpf_link *link,
+						      struct seq_file *seq)
+{
+	struct bpf_compact_ext_ops_link *st_link;
+	struct bpf_map *map;
+
+	st_link = container_of(link, struct bpf_compact_ext_ops_link, link);
+
+	rcu_read_lock();
+	map = rcu_dereference(st_link->map);
+	seq_printf(seq, "map_id:\t%d\nnode_id:\t%d\n", map->id, st_link->node_id);
+	rcu_read_unlock();
+}
+
+static int bpf_compact_ext_ops_map_link_fill_link_info(const struct bpf_link *link,
+							struct bpf_link_info *info)
+{
+	struct bpf_compact_ext_ops_link *st_link;
+	struct bpf_map *map;
+
+	st_link = container_of(link, struct bpf_compact_ext_ops_link, link);
+	rcu_read_lock();
+	map = rcu_dereference(st_link->map);
+	info->compact_ext_ops.map_id = map->id;
+	rcu_read_unlock();
+
+	info->compact_ext_ops.node_id = st_link->node_id;
+	return 0;
+}
+
+static int bpf_compact_ext_ops_map_link_update(struct bpf_link *link,
+					       struct bpf_map *new_map,
+					       struct bpf_map *expected_old_map)
+{
+	return -EOPNOTSUPP;
+}
+
+static const struct bpf_link_ops bpf_compact_ext_ops_map_lops = {
+	.dealloc = bpf_compact_ext_ops_map_link_dealloc,
+	.show_fdinfo = bpf_compact_ext_ops_map_link_show_fdinfo,
+	.fill_link_info = bpf_compact_ext_ops_map_link_fill_link_info,
+	.update_map = bpf_compact_ext_ops_map_link_update,
+};
+
+int bpf_compact_ext_ops_link_create(union bpf_attr *attr)
+{
+	struct bpf_compact_ext_ops_link *link = NULL;
+	struct bpf_link_primer link_primer;
+	struct bpf_struct_ops_map *st_map;
+	struct bpf_map *map;
+	pg_data_t *pgdat;
+	int node_id;
+	int err;
+
+	if (attr->link_create.target_fd >= MAX_NUMNODES)
+		return -EINVAL;
+	node_id = array_index_nospec(attr->link_create.target_fd,
+				     MAX_NUMNODES);
+	if (!node_online(node_id))
+		return -EINVAL;
+	pgdat = NODE_DATA(node_id);
+	if (!pgdat)
+		return -EINVAL;
+
+	map = bpf_map_get(attr->link_create.map_fd);
+	if (IS_ERR(map))
+		return PTR_ERR(map);
+
+	st_map = (struct bpf_struct_ops_map *)map;
+
+	if (!bpf_struct_ops_valid_to_reg(map) ||
+	    st_map->st_ops != &bpf_compact_ext_ops) {
+		err = -EINVAL;
+		goto err_out;
+	}
+
+	link = kzalloc(sizeof(*link), GFP_USER);
+	if (!link) {
+		err = -ENOMEM;
+		goto err_out;
+	}
+	bpf_link_init(&link->link, BPF_LINK_TYPE_COMPACT_EXT_OPS,
+		      &bpf_compact_ext_ops_map_lops, NULL);
+	link->node_id = node_id;
+
+	err = bpf_link_prime(&link->link, &link_primer);
+	if (err)
+		goto err_out;
+
+	err = st_map->st_ops->reg(st_map->kvalue.data, pgdat);
+	if (err) {
+		bpf_link_cleanup(&link_primer);
+		link = NULL;
+		goto err_out;
+	}
+	RCU_INIT_POINTER(link->map, map);
+
+	return bpf_link_settle(&link_primer);
+
+err_out:
+	bpf_map_put(map);
+	kfree(link);
+	return err;
+}
+#endif

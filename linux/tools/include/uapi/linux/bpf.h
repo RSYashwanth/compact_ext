@@ -1040,6 +1040,7 @@ enum bpf_attach_type {
 	BPF_TCX_INGRESS,
 	BPF_TCX_EGRESS,
 	BPF_TRACE_UPROBE_MULTI,
+	BPF_COMPACT_EXT_OPS,
 	__MAX_BPF_ATTACH_TYPE
 };
 
@@ -1059,6 +1060,7 @@ enum bpf_link_type {
 	BPF_LINK_TYPE_NETFILTER = 10,
 	BPF_LINK_TYPE_TCX = 11,
 	BPF_LINK_TYPE_UPROBE_MULTI = 12,
+	BPF_LINK_TYPE_COMPACT_EXT_OPS = 13,
 	MAX_BPF_LINK_TYPE,
 };
 
@@ -6555,6 +6557,10 @@ struct bpf_link_info {
 			__u32 ifindex;
 			__u32 attach_type;
 		} tcx;
+		struct {
+			__u32 node_id;
+			__u32 map_id;
+		} compact_ext_ops;
 	};
 } __attribute__((aligned(8)));
 
